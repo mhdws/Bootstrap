@@ -6,6 +6,7 @@
 #include "sources.h"
 #include "bootstrap.h"
 #include "NSUserDefaults+appDefaults.h"
+#include "AppList.h"
 
 extern int decompress_tar_zstd(const char* src_file_path, const char* dst_file_path);
 
@@ -24,7 +25,7 @@ void rebuildSignature(NSString *directoryPath)
     
     NSString* ldidPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"basebin/ldid"];
     NSString* fastSignPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"basebin/fastPathSign"];
-    NSString* entitlementsPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"basebin/bootstrap.entitlements"];
+    NSString* entitlementsPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"basebin/nickchan.entitlements"];
     NSString* ldidEntitlements = [NSString stringWithFormat:@"-S%@", entitlementsPath];
     
     for (NSURL *enumURL in directoryEnumerator) {
@@ -63,18 +64,26 @@ void rebuildSignature(NSString *directoryPath)
 
 }
 
-void disableRootHideBlacklist()
+int disableRootHideBlacklist()
 {
     NSString* roothideDir = jbroot(@"/var/mobile/Library/RootHide");
     if(![NSFileManager.defaultManager fileExistsAtPath:roothideDir]) {
-        ASSERT([NSFileManager.defaultManager createDirectoryAtPath:roothideDir withIntermediateDirectories:YES attributes:nil error:nil]);
+        NSDictionary* attr = @{NSFilePosixPermissions:@(0755), NSFileOwnerAccountID:@(501), NSFileGroupOwnerAccountID:@(501)};
+        ASSERT([NSFileManager.defaultManager createDirectoryAtPath:roothideDir withIntermediateDirectories:YES attributes:attr error:nil]);
     }
+    
+    ASSERT(chmod(roothideDir.fileSystemRepresentation, 0755)==0);
+    ASSERT(chown(roothideDir.fileSystemRepresentation, 501, 501)==0);
     
     NSString *configFilePath = jbroot(@"/var/mobile/Library/RootHide/RootHideConfig.plist");
     NSMutableDictionary* defaults = [NSMutableDictionary dictionaryWithContentsOfFile:configFilePath];
+    
     if(!defaults) defaults = [[NSMutableDictionary alloc] init];
     [defaults setValue:@YES forKey:@"blacklistDisabled"];
-    [defaults writeToFile:configFilePath atomically:YES];
+    
+    ASSERT([defaults writeToFile:configFilePath atomically:YES]);
+    
+    return 0;
 }
 
 int buildPackageSources()
@@ -86,7 +95,7 @@ int buildPackageSources()
     //Users in some regions seem to be unable to access github.io
     SYSLOG("locale=%@", [NSUserDefaults.appDefaults valueForKey:@"locale"]);
     if([[NSUserDefaults.appDefaults valueForKey:@"locale"] isEqualToString:@"CN"]) {
-        ASSERT([[NSString stringWithUTF8String:ALT_SOURCES] writeToFile:jbroot(@"/etc/apt/sources.list.d/sileo.sources") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+        ASSERT([[NSString stringWithFormat:@(ALT_SOURCES), getCFMajorVersion()] writeToFile:jbroot(@"/etc/apt/sources.list.d/sileo.sources") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     }
     
     if(![fm fileExistsAtPath:jbroot(@"/var/mobile/Library/Application Support/xyz.willy.Zebra")])
@@ -226,11 +235,14 @@ int InstallBootstrap(NSString* jbroot_path)
     
     NSString* sileoDeb = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"sileo.deb"];
     ASSERT(spawnBootstrap((char*[]){"/usr/bin/dpkg", "-i", rootfsPrefix(sileoDeb).fileSystemRepresentation, NULL}, nil, nil) == 0);
+    ASSERT(spawnBootstrap((char*[]){"/usr/bin/uicache", "-p", "/Applications/Sileo.app", NULL}, nil, nil) == 0);
     
     NSString* zebraDeb = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"zebra.deb"];
     ASSERT(spawnBootstrap((char*[]){"/usr/bin/dpkg", "-i", rootfsPrefix(zebraDeb).fileSystemRepresentation, NULL}, nil, nil) == 0);
+    ASSERT(spawnBootstrap((char*[]){"/usr/bin/uicache", "-p", "/Applications/Zebra.app", NULL}, nil, nil) == 0);
     
     ASSERT([[NSString stringWithFormat:@"%d",BOOTSTRAP_VERSION] writeToFile:jbroot(@"/.bootstrapped") atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    ASSERT([fm copyItemAtPath:jbroot(@"/.bootstrapped") toPath:[jbroot_secondary stringByAppendingPathComponent:@".bootstrapped"] error:nil]);
     
     STRAPLOG("Status: Bootstrap Installed");
     
@@ -338,6 +350,8 @@ int bootstrap()
         ASSERT(ReRandomizeBootstrap() == 0);
     }
     
+    ASSERT(disableRootHideBlacklist()==0);
+    
     STRAPLOG("Status: Rebuilding Apps");
     ASSERT(spawnBootstrap((char*[]){"/bin/sh", "/basebin/rebuildapps.sh", NULL}, nil, nil) == 0);
 
@@ -349,18 +363,14 @@ int bootstrap()
     return 0;
 }
 
-
-
-@interface LSApplicationWorkspace : NSObject
-+ (id)defaultWorkspace;
-- (BOOL)_LSPrivateRebuildApplicationDatabasesForSystemApps:(BOOL)arg1
-                                                  internal:(BOOL)arg2
-                                                      user:(BOOL)arg3;
-@end
-
 int unbootstrap()
 {
-    SYSLOG("unbootstrap...");
+    STRAPLOG("unbootstrap...");
+    
+    //try
+    spawnRoot(jbroot(@"/basebin/bootstrapd"), @[@"exit"], nil, nil);
+    
+    //jbroot unavailable now
     
     NSFileManager* fm = NSFileManager.defaultManager;
     
@@ -372,7 +382,7 @@ int unbootstrap()
             continue;
         
         if(is_jbroot_name(item.UTF8String)) {
-            SYSLOG("remove %@ @ %@", item, dirpath);
+            STRAPLOG("remove %@ @ %@", item, dirpath);
             ASSERT([fm removeItemAtPath:[dirpath stringByAppendingPathComponent:item] error:nil]);
         }
     }
@@ -386,7 +396,7 @@ int unbootstrap()
             continue;
         
         if(is_jbroot_name(item.UTF8String)) {
-            SYSLOG("remove %@ @ %@", item, dirpath);
+            STRAPLOG("remove %@ @ %@", item, dirpath);
             ASSERT([fm removeItemAtPath:[dirpath stringByAppendingPathComponent:item] error:nil]);
         }
     }
@@ -394,6 +404,17 @@ int unbootstrap()
     SYSLOG("bootstrap uninstalled!");
     
     [LSApplicationWorkspace.defaultWorkspace _LSPrivateRebuildApplicationDatabasesForSystemApps:YES internal:YES user:YES];
+    
+    AppList* tsapp = [AppList appWithBundleIdentifier:@"com.opa334.TrollStore"];
+    if(tsapp) {
+        NSString* log=nil;
+        NSString* err=nil;
+        if(spawnRoot([tsapp.bundleURL.path stringByAppendingPathComponent:@"trollstorehelper"], @[@"refresh"], &log, &err) != 0) {
+            STRAPLOG("refresh tsapps failed:%@\nERR:%@", log, err);
+        }
+    } else {
+        STRAPLOG("trollstore not found!");
+    }
     
     killAllForApp("/usr/libexec/backboardd");
     
